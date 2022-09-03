@@ -1,10 +1,12 @@
 import { expect } from "chai";
-import { deployments, waffle } from "hardhat";
+import { deployments, ethers, waffle } from 'hardhat';
 import "@nomiclabs/hardhat-ethers";
 import { AddressZero } from "@ethersproject/constants";
-import { getSafeTemplate, getSafeWithOwners } from "../utils/setup";
-import { safeSignTypedData, executeTx, safeSignMessage, calculateSafeTransactionHash, safeApproveHash, buildSafeTransaction, logGas, calculateSafeDomainSeparator, preimageSafeTransactionHash, buildSignatureBytes } from "../../src/utils/execution";
+import { getMockERC20, getSafeTemplate, getSafeWithOwners } from '../utils/setup';
+import { safeSignTypedData, executeTx, safeSignMessage, calculateSafeTransactionHash, safeApproveHash, executeTxWithSigners, buildSafeTransaction, logGas, calculateSafeDomainSeparator, preimageSafeTransactionHash, buildSignatureBytes } from "../../src/utils/execution";
 import { chainId } from "../utils/encoding";
+import { Contract } from 'ethers';
+import { parseEther } from 'ethers/lib/utils';
 
 describe("GnosisSafe", async () => {
 
@@ -12,8 +14,12 @@ describe("GnosisSafe", async () => {
 
     const setupTests = deployments.createFixture(async ({ deployments }) => {
         await deployments.fixture();
+        const token = await getMockERC20();
+        await token.transfer(user2.address, ethers.utils.parseEther('10'));
+        await token.transfer(user3.address, ethers.utils.parseEther('10'));
         return {
-            safe: await getSafeWithOwners([user1.address])
+            safe: await getSafeWithOwners([user1.address, user2.address, user3.address], token.address),
+            token
         }
     })
     describe("domainSeparator", async () => {
@@ -53,7 +59,7 @@ describe("GnosisSafe", async () => {
             const { safe } = await setupTests()
             const tx = buildSafeTransaction({ to: safe.address, nonce: await safe.nonce() })
             const txHash = calculateSafeTransactionHash(safe, tx, await chainId())
-            const signerSafe = safe.connect(user2)
+            const signerSafe = safe.connect(user4)
             await expect(
                 signerSafe.approveHash(txHash)
             ).to.be.revertedWith("GS030")
@@ -70,14 +76,6 @@ describe("GnosisSafe", async () => {
     })
 
     describe("execTransaction", async () => {
-        it('should fail if signature points into static part', async () => {
-            const { safe } = await setupTests()
-            const signatures = "0x" + "000000000000000000000000" + user1.address.slice(2) + "0000000000000000000000000000000000000000000000000000000000000020" + "00" + // r, s, v  
-                "0000000000000000000000000000000000000000000000000000000000000000" // Some data to read
-            await expect(
-                safe.execTransaction(safe.address, 0, "0x", 0, 0, 0, 0, AddressZero, AddressZero, signatures)
-            ).to.be.revertedWith("GS021")
-        })
 
         it('should fail if sigantures data is not present', async () => {
             const { safe } = await setupTests()
@@ -112,8 +110,8 @@ describe("GnosisSafe", async () => {
         })
 
         it('should not be able to use different chainId for signing', async () => {
-            await setupTests()
-            const safe = await getSafeWithOwners([user1.address])
+            const {token} = await setupTests()
+            const safe = await getSafeWithOwners([user1.address], token.address)
             const tx = buildSafeTransaction({ to: safe.address, nonce: await safe.nonce() })
             await expect(
                 executeTx(safe, tx, [await safeSignTypedData(user1, safe, tx, 1)])
@@ -181,18 +179,9 @@ describe("GnosisSafe", async () => {
             ).to.be.revertedWith("GS001")
         })
 
-        it('should revert if not the required amount of signature data is provided', async () => {
-            await setupTests()
-            const safe = await getSafeWithOwners([user1.address, user2.address, user3.address])
-            const tx = buildSafeTransaction({ to: safe.address, nonce: await safe.nonce() })
-            await expect(
-                executeTx(safe, tx, [])
-            ).to.be.revertedWith("GS020")
-        })
-
         it('should not be able to use different signature type of same owner', async () => {
-            await setupTests()
-            const safe = await getSafeWithOwners([user1.address, user2.address, user3.address])
+            const {token} = await setupTests()
+            const safe = await getSafeWithOwners([user1.address, user2.address, user3.address], token.address)
             const tx = buildSafeTransaction({ to: safe.address, nonce: await safe.nonce() })
             await expect(
                 executeTx(safe, tx, [await safeApproveHash(user1, safe, tx), await safeSignTypedData(user1, safe, tx), await safeSignTypedData(user3, safe, tx)])
@@ -200,8 +189,8 @@ describe("GnosisSafe", async () => {
         })
 
         it('should be able to mix all signature types', async () => {
-            await setupTests()
-            const safe = await getSafeWithOwners([user1.address, user2.address, user3.address, user4.address])
+            const {token} = await setupTests()
+            const safe = await getSafeWithOwners([user1.address, user2.address, user3.address, user4.address], token.address)
             const tx = buildSafeTransaction({ to: safe.address, nonce: await safe.nonce() })
             await expect(
                 logGas(
@@ -218,18 +207,6 @@ describe("GnosisSafe", async () => {
     })
 
     describe("checkSignatures", async () => {
-        it('should fail if signature points into static part', async () => {
-            const { safe } = await setupTests()
-            const tx = buildSafeTransaction({ to: safe.address, nonce: await safe.nonce() })
-            const txHashData = preimageSafeTransactionHash(safe, tx, await chainId())
-            const txHash = calculateSafeTransactionHash(safe, tx, await chainId())
-            const signatures = "0x" + "000000000000000000000000" + user1.address.slice(2) + "0000000000000000000000000000000000000000000000000000000000000020" + "00" + // r, s, v  
-                "0000000000000000000000000000000000000000000000000000000000000000" // Some data to read
-            await expect(
-                safe.checkSignatures(txHash, txHashData, signatures)
-            ).to.be.revertedWith("GS021")
-        })
-
         it('should fail if signatures data is not present', async () => {
             const { safe } = await setupTests()
             const tx = buildSafeTransaction({ to: safe.address, nonce: await safe.nonce() })
@@ -258,8 +235,8 @@ describe("GnosisSafe", async () => {
         })
 
         it('should not be able to use different chainId for signing', async () => {
-            await setupTests()
-            const safe = await getSafeWithOwners([user1.address])
+            const {token} = await setupTests()
+            const safe = await getSafeWithOwners([user1.address], token.address)
             const tx = buildSafeTransaction({ to: safe.address, nonce: await safe.nonce() })
             const txHashData = preimageSafeTransactionHash(safe, tx, await chainId())
             const txHash = calculateSafeTransactionHash(safe, tx, await chainId())
@@ -292,20 +269,10 @@ describe("GnosisSafe", async () => {
             ).to.be.revertedWith("GS001")
         })
 
-        it('should revert if not the required amount of signature data is provided', async () => {
-            await setupTests()
-            const safe = await getSafeWithOwners([user1.address, user2.address, user3.address])
-            const tx = buildSafeTransaction({ to: safe.address, nonce: await safe.nonce() })
-            const txHashData = preimageSafeTransactionHash(safe, tx, await chainId())
-            const txHash = calculateSafeTransactionHash(safe, tx, await chainId())
-            await expect(
-                safe.checkSignatures(txHash, txHashData, "0x")
-            ).to.be.revertedWith("GS020")
-        })
 
         it('should not be able to use different signature type of same owner', async () => {
-            await setupTests()
-            const safe = await getSafeWithOwners([user1.address, user2.address, user3.address])
+            const {token} = await setupTests()
+            const safe = await getSafeWithOwners([user1.address, user2.address, user3.address], token.address)
             const tx = buildSafeTransaction({ to: safe.address, nonce: await safe.nonce() })
             const txHashData = preimageSafeTransactionHash(safe, tx, await chainId())
             const txHash = calculateSafeTransactionHash(safe, tx, await chainId())
@@ -320,8 +287,8 @@ describe("GnosisSafe", async () => {
         })
 
         it('should be able to mix all signature types', async () => {
-            await setupTests()
-            const safe = await getSafeWithOwners([user1.address, user2.address, user3.address, user4.address])
+            const {token} = await setupTests()
+            const safe = await getSafeWithOwners([user1.address, user2.address, user3.address, user4.address], token.address)
             const tx = buildSafeTransaction({ to: safe.address, nonce: await safe.nonce() })
             const txHashData = preimageSafeTransactionHash(safe, tx, await chainId())
             const txHash = calculateSafeTransactionHash(safe, tx, await chainId())
@@ -337,17 +304,6 @@ describe("GnosisSafe", async () => {
     })
 
     describe("checkSignatures", async () => {
-        it('should fail if signature points into static part', async () => {
-            const { safe } = await setupTests()
-            const tx = buildSafeTransaction({ to: safe.address, nonce: await safe.nonce() })
-            const txHashData = preimageSafeTransactionHash(safe, tx, await chainId())
-            const txHash = calculateSafeTransactionHash(safe, tx, await chainId())
-            const signatures = "0x" + "000000000000000000000000" + user1.address.slice(2) + "0000000000000000000000000000000000000000000000000000000000000020" + "00" + // r, s, v  
-                "0000000000000000000000000000000000000000000000000000000000000000" // Some data to read
-            await expect(
-                safe.checkNSignatures(txHash, txHashData, signatures, 1)
-            ).to.be.revertedWith("GS021")
-        })
 
         it('should fail if signatures data is not present', async () => {
             const { safe } = await setupTests()
@@ -358,7 +314,7 @@ describe("GnosisSafe", async () => {
             const signatures = "0x" + "000000000000000000000000" + user1.address.slice(2) + "0000000000000000000000000000000000000000000000000000000000000041" + "00" // r, s, v
 
             await expect(
-                safe.checkNSignatures(txHash, txHashData, signatures, 1)
+                safe.checkStakeSignatures(txHash, txHashData, signatures, 1)
             ).to.be.revertedWith("GS022")
         })
 
@@ -372,19 +328,19 @@ describe("GnosisSafe", async () => {
                 "0000000000000000000000000000000000000000000000000000000000000020" // length
 
             await expect(
-                safe.checkNSignatures(txHash, txHashData, signatures, 1)
+                safe.checkStakeSignatures(txHash, txHashData, signatures, 1)
             ).to.be.revertedWith("GS023")
         })
 
         it('should not be able to use different chainId for signing', async () => {
-            await setupTests()
-            const safe = await getSafeWithOwners([user1.address])
+            const {token} = await setupTests()
+            const safe = await getSafeWithOwners([user1.address], token.address)
             const tx = buildSafeTransaction({ to: safe.address, nonce: await safe.nonce() })
             const txHashData = preimageSafeTransactionHash(safe, tx, await chainId())
             const txHash = calculateSafeTransactionHash(safe, tx, await chainId())
             const signatures = buildSignatureBytes([await safeSignTypedData(user1, safe, tx, 1)])
             await expect(
-                safe.checkNSignatures(txHash, txHashData, signatures, 1)
+                safe.checkStakeSignatures(txHash, txHashData, signatures, 1)
             ).to.be.revertedWith("GS026")
         })
 
@@ -396,24 +352,13 @@ describe("GnosisSafe", async () => {
             const txHash = calculateSafeTransactionHash(safe, tx, await chainId())
             const signatures = buildSignatureBytes([await safeApproveHash(user1, safe, tx, true)])
             await expect(
-                user2Safe.checkNSignatures(txHash, txHashData, signatures, 1)
+                user2Safe.checkStakeSignatures(txHash, txHashData, signatures, 1)
             ).to.be.revertedWith("GS025")
         })
 
-        it('should revert if not the required amount of signature data is provided', async () => {
-            await setupTests()
-            const safe = await getSafeWithOwners([user1.address, user2.address, user3.address])
-            const tx = buildSafeTransaction({ to: safe.address, nonce: await safe.nonce() })
-            const txHashData = preimageSafeTransactionHash(safe, tx, await chainId())
-            const txHash = calculateSafeTransactionHash(safe, tx, await chainId())
-            await expect(
-                safe.checkNSignatures(txHash, txHashData, "0x", 1)
-            ).to.be.revertedWith("GS020")
-        })
-
         it('should not be able to use different signature type of same owner', async () => {
-            await setupTests()
-            const safe = await getSafeWithOwners([user1.address, user2.address, user3.address])
+            const {token} = await setupTests()
+            const safe = await getSafeWithOwners([user1.address, user2.address, user3.address], token.address)
             const tx = buildSafeTransaction({ to: safe.address, nonce: await safe.nonce() })
             const txHashData = preimageSafeTransactionHash(safe, tx, await chainId())
             const txHash = calculateSafeTransactionHash(safe, tx, await chainId())
@@ -423,13 +368,13 @@ describe("GnosisSafe", async () => {
                 await safeSignTypedData(user3, safe, tx)
             ])
             await expect(
-                safe.checkNSignatures(txHash, txHashData, signatures, 3)
+                safe.checkStakeSignatures(txHash, txHashData, signatures, 3)
             ).to.be.revertedWith("GS026")
         })
 
         it('should be able to mix all signature types', async () => {
-            await setupTests()
-            const safe = await getSafeWithOwners([user1.address, user2.address, user3.address, user4.address])
+            const { token } = await setupTests()
+            const safe = await getSafeWithOwners([user1.address, user2.address, user3.address, user4.address], token.address)
             const tx = buildSafeTransaction({ to: safe.address, nonce: await safe.nonce() })
             const txHashData = preimageSafeTransactionHash(safe, tx, await chainId())
             const txHash = calculateSafeTransactionHash(safe, tx, await chainId())
@@ -440,49 +385,37 @@ describe("GnosisSafe", async () => {
                 await safeSignTypedData(user3, safe, tx)
             ])
 
-            await safe.checkNSignatures(txHash, txHashData, signatures, 3)
+            await safe.checkStakeSignatures(txHash, txHashData, signatures, 3)
         })
 
-        it('should be able to require no signatures', async () => {
-            await setupTests()
-            const safe = await getSafeTemplate()
-            const tx = buildSafeTransaction({ to: safe.address, nonce: await safe.nonce() })
-            const txHashData = preimageSafeTransactionHash(safe, tx, await chainId())
-            const txHash = calculateSafeTransactionHash(safe, tx, await chainId())
+    })
 
-            await safe.checkNSignatures(txHash, txHashData, "0x", 0)
+    describe('stake check', () => {
+        let sContract: Contract;
+        let Token: Contract;
+        beforeEach(async () => {
+            const { token } = await setupTests();
+            Token = token;
+            sContract = await getSafeWithOwners([user1.address, user2.address, user3.address], token.address, 50)
+            await user1.sendTransaction({to: sContract.address, value: parseEther('10')})
+            await Token.approve(sContract.address, parseEther('2'))
+            await sContract.stake(parseEther('2'))
+            await Token.connect(user2).approve(sContract.address, parseEther('1'))
+            await sContract.connect(user2).stake(parseEther('1'))
+            await Token.connect(user3).approve(sContract.address, parseEther('1'))
+            await sContract.connect(user3).stake(parseEther('1'))
         })
-
-        it('should be able to require less signatures than the threshold', async () => {
-            await setupTests()
-            const safe = await getSafeWithOwners([user1.address, user2.address, user3.address, user4.address])
-            const tx = buildSafeTransaction({ to: safe.address, nonce: await safe.nonce() })
-            const txHashData = preimageSafeTransactionHash(safe, tx, await chainId())
-            const txHash = calculateSafeTransactionHash(safe, tx, await chainId())
-            const signatures = buildSignatureBytes([
-                await safeSignTypedData(user3, safe, tx)
-            ])
-
-            await safe.checkNSignatures(txHash, txHashData, signatures, 1)
-        })
-
-        it('should be able to require more signatures than the threshold', async () => {
-            await setupTests()
-            const safe = await getSafeWithOwners([user1.address, user2.address, user3.address, user4.address], 2)
-            const tx = buildSafeTransaction({ to: safe.address, nonce: await safe.nonce() })
-            const txHashData = preimageSafeTransactionHash(safe, tx, await chainId())
-            const txHash = calculateSafeTransactionHash(safe, tx, await chainId())
-            const signatures = buildSignatureBytes([
-                await safeApproveHash(user1, safe, tx, true),
-                await safeApproveHash(user4, safe, tx),
-                await safeSignTypedData(user2, safe, tx)
-            ])
-            // Should fail as only 3 signaures are provided
-            await expect(
-                safe.checkNSignatures(txHash, txHashData, signatures, 4)
-            ).to.be.revertedWith("GS020")
-
-            await safe.checkNSignatures(txHash, txHashData, signatures, 3)
-        })
+        it('should revert if not enough staked balance', async () => {
+            const nonce = await sContract.nonce()
+            const tx = buildSafeTransaction({ to: user4.address, value: parseEther("1"), nonce })
+            await expect(executeTxWithSigners(sContract, tx, [user2])).to.be.revertedWith('revert not enough staked balance')
+        });
+        it('should exec tx if enough staked balance', async () => {
+            const nonce = await sContract.nonce()
+            const tx = buildSafeTransaction({ to: user4.address, value: parseEther("1"), nonce })
+            const prevBalance = await ethers.provider.getBalance(user4.address);
+            await executeTxWithSigners(sContract, tx, [user1]);
+            await expect(await ethers.provider.getBalance(user4.address)).to.be.deep.eq(prevBalance.add(parseEther("1")))
+        });
     })
 })

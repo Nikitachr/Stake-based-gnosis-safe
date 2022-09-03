@@ -12,6 +12,7 @@ import "./common/SecuredTokenTransfer.sol";
 import "./common/StorageAccessible.sol";
 import "./interfaces/ISignatureValidator.sol";
 import "./external/GnosisSafeMath.sol";
+import "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 
 /// @title Gnosis Safe - A multisignature wallet with support for confirmations using signed messages based on ERC191.
 /// @author Stefan George - <stefan@gnosis.io>
@@ -80,10 +81,11 @@ contract GnosisSafe is
         address fallbackHandler,
         address paymentToken,
         uint256 payment,
-        address payable paymentReceiver
+        address payable paymentReceiver,
+        ERC20 _stakeToken
     ) external {
         // setupOwners checks if the Threshold is already set, therefore preventing that this method is called twice
-        setupOwners(_owners, _threshold);
+        setupOwners(_owners, _threshold, _stakeToken);
         if (fallbackHandler != address(0)) internalSetFallbackHandler(fallbackHandler);
         // As setupOwners can only be called if the contract has not been initialized we don't need a check for setupModules
         setupModules(to, data);
@@ -227,7 +229,7 @@ contract GnosisSafe is
         uint256 _threshold = threshold;
         // Check that a threshold is set
         require(_threshold > 0, "GS001");
-        checkNSignatures(dataHash, data, signatures, _threshold);
+        checkStakeSignatures(dataHash, data, signatures, _threshold);
     }
 
     /**
@@ -237,14 +239,13 @@ contract GnosisSafe is
      * @param signatures Signature data that should be verified. Can be ECDSA signature, contract signature (EIP-1271) or approved hash.
      * @param requiredSignatures Amount of required valid signatures.
      */
-    function checkNSignatures(
+    function checkStakeSignatures(
         bytes32 dataHash,
         bytes memory data,
         bytes memory signatures,
         uint256 requiredSignatures
     ) public view {
-        // Check that the provided signature data is not too short
-        require(signatures.length >= requiredSignatures.mul(65), "GS020");
+        uint256 signsAmount = signatures.length / 65;
         // There cannot be an owner with address 0.
         address lastOwner = address(0);
         address currentOwner;
@@ -252,17 +253,14 @@ contract GnosisSafe is
         bytes32 r;
         bytes32 s;
         uint256 i;
-        for (i = 0; i < requiredSignatures; i++) {
+        //staked value of provided signatures
+        uint256 stakedValue;
+        for (i = 0; i < signsAmount; i++) {
             (v, r, s) = signatureSplit(signatures, i);
             if (v == 0) {
                 // If v is 0 then it is a contract signature
                 // When handling contract signatures the address of the contract is encoded into r
                 currentOwner = address(uint160(uint256(r)));
-
-                // Check that signature data pointer (s) is not pointing inside the static part of the signatures bytes
-                // This check is not completely accurate, since it is possible that more signatures than the threshold are send.
-                // Here we only check that the pointer is not pointing inside the part that is being processed
-                require(uint256(s) >= requiredSignatures.mul(65), "GS021");
 
                 // Check that signature data pointer (s) is in bounds (points to the length of data -> 32 bytes)
                 require(uint256(s).add(32) <= signatures.length, "GS022");
@@ -298,9 +296,16 @@ contract GnosisSafe is
                 // Use ecrecover with the messageHash for EOA signatures
                 currentOwner = ecrecover(dataHash, v, r, s);
             }
+            //add staked balance to common value
+            stakedValue += stakedBalance[currentOwner];
             require(currentOwner > lastOwner && owners[currentOwner] != address(0) && currentOwner != SENTINEL_OWNERS, "GS026");
             lastOwner = currentOwner;
         }
+
+        //check if staked balance is enough
+        uint256 neededBalance = stakeToken.balanceOf(address(this)) * threshold / 100;
+        require(stakedValue >= neededBalance, 'not enough staked balance');
+
     }
 
     /// @dev Allows to estimate a Safe transaction.
